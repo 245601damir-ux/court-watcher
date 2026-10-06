@@ -103,6 +103,10 @@ func get(path string, out any) error {
 // Успешный прогон перезаписывает state одними слотами, так что флаг сам исчезает.
 const authAlertKey = "__auth_alert_sent"
 
+// maxListed — сколько слотов перечисляем в сообщении. У Telegram лимит 4096
+// символов, а первый прогон (пустой state) находит сразу сотни слотов.
+const maxListed = 40
+
 func main() {
 	cid := env("COMPANY_ID", "521176")
 	days := 7
@@ -168,7 +172,12 @@ func main() {
 
 	log.Printf("кортов: %d, свободных слотов: %d, новых: %d", len(courts), len(current), len(fresh))
 	if len(fresh) > 0 {
-		msg := "🎾 Появились крытые корты:\n" + strings.Join(fresh, "\n") +
+		shown, tail := fresh, ""
+		if len(shown) > maxListed {
+			tail = fmt.Sprintf("\n…и ещё %d слотов", len(shown)-maxListed)
+			shown = shown[:maxListed]
+		}
+		msg := "🎾 Появились крытые корты:\n" + strings.Join(shown, "\n") + tail +
 			"\n\nhttps://academytennisdaulet.altegio.me/company/" + cid + "/personal/select-master"
 		if err := notify(msg); err != nil {
 			log.Fatalf("telegram: %v", err) // не сохраняем state, чтобы повторить в следующий раз
