@@ -179,7 +179,7 @@ func main() {
 			tail = fmt.Sprintf("\n…и ещё %d слотов", len(shown)-maxListed)
 			shown = shown[:maxListed]
 		}
-		msg := "🎾 Появились крытые корты:\n" + strings.Join(shown, "\n") + tail +
+		msg := "🎾 Появились слоты (" + kinds(courts) + "):\n" + strings.Join(shown, "\n") + tail +
 			"\n\nhttps://academytennisdaulet.altegio.me/company/" + cid + "/personal/select-master"
 		if err := notify(msg); err != nil {
 			log.Fatalf("telegram: %v", err) // не сохраняем state, чтобы повторить в следующий раз
@@ -210,6 +210,25 @@ func reportDeadToken(stateFile string, seen map[string]bool, cause error) {
 	if err := os.WriteFile(stateFile, b, 0o644); err != nil {
 		log.Printf("state: %v", err)
 	}
+}
+
+// kinds перечисляет специализации отобранных кортов, чтобы заголовок не врал:
+// в STAFF_IDS можно задать любые корты, не только крытые.
+func kinds(courts []staff) string {
+	var out []string
+	got := map[string]bool{}
+	for _, c := range courts {
+		k := strings.TrimSpace(c.Specialization)
+		if k != "" && !got[k] {
+			got[k] = true
+			out = append(out, k)
+		}
+	}
+	if len(out) == 0 {
+		return "корты"
+	}
+	sort.Strings(out)
+	return strings.Join(out, ", ")
 }
 
 // padHour приводит "6:00" к "06:00": Altegio отдаёт час без ведущего нуля,
