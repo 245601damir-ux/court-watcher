@@ -2,18 +2,21 @@
 // и шлёт уведомление в Telegram о НОВЫХ слотах.
 //
 // Переменные окружения:
-//   COMPANY_ID    — id филиала (по умолчанию 521176)
-//   ALTEGIO_TOKEN — Bearer-токен из запросов виджета (см. README), может быть пустым
-//   API_BASE      — по умолчанию https://api.alteg.io/api/v1
-//   NAME_FILTER   — слова через запятую для отбора кортов по имени (по умолчанию "крыт,indoor,хард")
-//   STAFF_IDS     — явный список id кортов через запятую (перекрывает NAME_FILTER)
-//   DAYS_AHEAD    — на сколько дней вперёд смотреть (по умолчанию 7)
-//   TG_TOKEN, TG_CHAT_ID — бот и чат для уведомлений
-//   STATE_FILE    — файл с уже отправленными слотами (по умолчанию state.json)
+//
+//	COMPANY_ID    — id филиала (по умолчанию 521176)
+//	ALTEGIO_TOKEN — Bearer-токен из запросов виджета (см. README);
+//	                обязателен: без него API отдаёт 401, и бот пишет об этом в Telegram
+//	API_BASE      — по умолчанию https://api.alteg.io/api/v1
+//	NAME_FILTER   — слова через запятую для отбора кортов по имени (по умолчанию "крыт,indoor,хард")
+//	STAFF_IDS     — явный список id кортов через запятую (перекрывает NAME_FILTER)
+//	DAYS_AHEAD    — на сколько дней вперёд смотреть (по умолчанию 7)
+//	TG_TOKEN, TG_CHAT_ID — бот и чат для уведомлений
+//	STATE_FILE    — файл с уже отправленными слотами (по умолчанию state.json)
 package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -53,6 +56,20 @@ func env(k, def string) string {
 	return def
 }
 
+// httpErr несёт код ответа, чтобы отличить сдохший токен (401/403) от прочих сбоев.
+type httpErr struct {
+	code int
+	msg  string
+}
+
+func (e *httpErr) Error() string { return e.msg }
+
+// authExpired сообщает, что Altegio отказал именно в авторизации.
+func authExpired(err error) bool {
+	var he *httpErr
+	return errors.As(err, &he) && (he.code == 401 || he.code == 403)
+}
+
 // get делает запрос и раскладывает поле data (или весь ответ, если обёртки нет) в out.
 func get(path string, out any) error {
 	req, _ := http.NewRequest("GET", apiBase+path, nil)
@@ -68,7 +85,10 @@ func get(path string, out any) error {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("%s: HTTP %d: %.300s", path, resp.StatusCode, body)
+		return &httpErr{
+			code: resp.StatusCode,
+			msg:  fmt.Sprintf("%s: HTTP %d: %.300s", path, resp.StatusCode, body),
+		}
 	}
 	var wrap struct {
 		Data json.RawMessage `json:"data"`
@@ -79,13 +99,26 @@ func get(path string, out any) error {
 	return json.Unmarshal(body, out)
 }
 
+// authAlertKey — служебный ключ в state: алерт о мёртвом токене уже отправлен.
+// Успешный прогон перезаписывает state одними слотами, так что флаг сам исчезает.
+const authAlertKey = "__auth_alert_sent"
+
 func main() {
 	cid := env("COMPANY_ID", "521176")
 	days := 7
 	fmt.Sscanf(env("DAYS_AHEAD", "7"), "%d", &days)
 
+	stateFile := env("STATE_FILE", "state.json")
+	seen := map[string]bool{}
+	if b, err := os.ReadFile(stateFile); err == nil {
+		_ = json.Unmarshal(b, &seen)
+	}
+
 	var all []staff
 	if err := get("/book_staff/"+cid, &all); err != nil {
+		if authExpired(err) {
+			reportDeadToken(stateFile, seen, err)
+		}
 		log.Fatalf("список кортов: %v", err)
 	}
 
@@ -123,12 +156,6 @@ func main() {
 		}
 	}
 
-	stateFile := env("STATE_FILE", "state.json")
-	seen := map[string]bool{}
-	if b, err := os.ReadFile(stateFile); err == nil {
-		_ = json.Unmarshal(b, &seen)
-	}
-
 	var fresh []string
 	newState := map[string]bool{}
 	for k, v := range current {
@@ -149,6 +176,26 @@ func main() {
 	}
 
 	b, _ := json.Marshal(newState)
+	if err := os.WriteFile(stateFile, b, 0o644); err != nil {
+		log.Printf("state: %v", err)
+	}
+}
+
+// reportDeadToken шлёт один алерт на всё время, пока токен не принимают:
+// иначе каждый часовой прогон писал бы в Telegram одно и то же.
+func reportDeadToken(stateFile string, seen map[string]bool, cause error) {
+	if seen[authAlertKey] {
+		log.Println("токен всё ещё не принимается, алерт уже отправлен ранее")
+		return
+	}
+	msg := "⚠️ court-watcher: Altegio не принимает ALTEGIO_TOKEN.\n" +
+		"Проверка слотов стоит, пока токен не обновишь.\n\n" + cause.Error()
+	if err := notify(msg); err != nil {
+		log.Printf("алерт о токене не ушёл: %v", err) // флаг не ставим — повторим через час
+		return
+	}
+	seen[authAlertKey] = true
+	b, _ := json.Marshal(seen)
 	if err := os.WriteFile(stateFile, b, 0o644); err != nil {
 		log.Printf("state: %v", err)
 	}
