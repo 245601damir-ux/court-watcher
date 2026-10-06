@@ -26,6 +26,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -48,6 +49,8 @@ type datesResp struct {
 // freeSlot — один свободный час на одном корте.
 type freeSlot struct {
 	court string
+	sign  string // значок типа корта: 🏠 / ☀️ / 🧱
+	label string // расшифровка значка
 	date  string // 2026-10-07
 	hour  string // 19:00
 }
@@ -165,7 +168,8 @@ func main() {
 			for _, s := range slots {
 				t := padHour(s.Time)
 				key := fmt.Sprintf("%d|%s|%s", c.ID, date, t)
-				current[key] = freeSlot{court: c.Name, date: date, hour: t}
+				sign, label := kindLabel(c.Specialization)
+				current[key] = freeSlot{court: c.Name, sign: sign, label: label, date: date, hour: t}
 			}
 		}
 	}
@@ -186,17 +190,23 @@ func main() {
 		if a.hour != b.hour {
 			return a.hour < b.hour
 		}
+		if a.sign != b.sign {
+			return a.sign < b.sign
+		}
 		return a.court < b.court
 	})
 
 	log.Printf("кортов: %d, свободных слотов: %d, новых: %d", len(courts), len(current), len(fresh))
-	if len(fresh) > 0 {
-		body, dropped := fitLines(groupByTime(fresh))
-		if dropped > 0 {
-			body += fmt.Sprintf("\n…и ещё %d строк", dropped)
+	chunks := chunkLines(groupByTime(fresh))
+	for i, ch := range chunks {
+		head := "🎾 Появились слоты\n" + legend(fresh) + "\n\n"
+		if i > 0 {
+			head = fmt.Sprintf("🎾 Слоты, продолжение (%d/%d)\n\n", i+1, len(chunks))
 		}
-		msg := "🎾 Появились слоты (" + kinds(courts) + "):\n" + body +
-			"\n\nhttps://academytennisdaulet.altegio.me/company/" + cid + "/personal/select-master"
+		msg := head + strings.Join(ch, "\n")
+		if i == len(chunks)-1 {
+			msg += "\n\nhttps://academytennisdaulet.altegio.me/company/" + cid + "/personal/select-master"
+		}
 		if err := notify(msg); err != nil {
 			log.Fatalf("telegram: %v", err) // не сохраняем state, чтобы повторить в следующий раз
 		}
@@ -240,51 +250,82 @@ func ruDate(iso string) string {
 	return fmt.Sprintf("%d %s", t.Day(), ruMonths[t.Month()-1])
 }
 
-// groupByTime собирает слоты одного часа в строку "7 окт 19:00 — Корт 1, Корт 3".
-// fresh должен быть отсортирован по дате, часу и названию корта.
+// kindLabel даёт значок и короткое название типа корта.
+// Порядок проверок важен: "открытый" содержит в себе подстроку "крыт".
+func kindLabel(kind string) (string, string) {
+	k := strings.ToLower(kind)
+	switch {
+	case strings.Contains(k, "открыт"):
+		return "☀️", "открытый"
+	case strings.Contains(k, "крыт"):
+		return "🏠", "крытый"
+	case strings.Contains(k, "стен"):
+		return "🧱", "стенка"
+	case strings.Contains(k, "пляж"):
+		return "🏖", "пляжный"
+	}
+	return "•", kind
+}
+
+// groupByTime собирает слоты одного часа в одну строку, а внутри неё — корты
+// одного типа под общим значком: "7 окт 19:00 — ☀️ Корт №1, Корт №3 · 🏠 Корт 1".
+// fresh должен быть отсортирован по дате, часу, типу и названию.
 func groupByTime(fresh []freeSlot) []string {
 	var lines []string
 	for i := 0; i < len(fresh); {
-		j, names := i, []string{}
-		for ; j < len(fresh) && fresh[j].date == fresh[i].date && fresh[j].hour == fresh[i].hour; j++ {
-			names = append(names, fresh[j].court)
+		end := i
+		for ; end < len(fresh) && fresh[end].date == fresh[i].date && fresh[end].hour == fresh[i].hour; end++ {
+		}
+		var groups []string
+		for j := i; j < end; {
+			k := j
+			names := []string{}
+			for ; k < end && fresh[k].sign == fresh[j].sign; k++ {
+				names = append(names, fresh[k].court)
+			}
+			groups = append(groups, fresh[j].sign+" "+strings.Join(names, ", "))
+			j = k
 		}
 		lines = append(lines, fmt.Sprintf("%s %s — %s",
-			ruDate(fresh[i].date), fresh[i].hour, strings.Join(names, ", ")))
-		i = j
+			ruDate(fresh[i].date), fresh[i].hour, strings.Join(groups, " · ")))
+		i = end
 	}
 	return lines
 }
 
-// fitLines берёт столько строк, сколько влезает в лимит Telegram, и сообщает,
-// сколько осталось за бортом. Telegram считает символы, а не байты.
-func fitLines(lines []string) (string, int) {
-	total := 0
-	for i, l := range lines {
-		if total += utf8.RuneCountInString(l) + 1; total > tgLimit {
-			return strings.Join(lines[:i], "\n"), len(lines) - i
-		}
-	}
-	return strings.Join(lines, "\n"), 0
-}
-
-// kinds перечисляет специализации отобранных кортов, чтобы заголовок не врал:
-// в STAFF_IDS можно задать любые корты, не только крытые.
-func kinds(courts []staff) string {
+// legend расшифровывает значки, которые реально встретились в сообщении.
+func legend(fresh []freeSlot) string {
 	var out []string
 	got := map[string]bool{}
-	for _, c := range courts {
-		k := strings.TrimSpace(c.Specialization)
-		if k != "" && !got[k] {
-			got[k] = true
-			out = append(out, k)
+	for _, s := range fresh {
+		if !got[s.sign] {
+			got[s.sign] = true
+			out = append(out, s.sign+" "+s.label)
 		}
 	}
-	if len(out) == 0 {
-		return "корты"
-	}
 	sort.Strings(out)
-	return strings.Join(out, ", ")
+	return strings.Join(out, " · ")
+}
+
+// chunkLines режет строки на куски, каждый из которых влезает в лимит Telegram.
+// Обрезать нельзя: выброшенные слоты всё равно помечаются отправленными,
+// то есть о них больше никогда не напомнят. Telegram считает символы, не байты.
+func chunkLines(lines []string) [][]string {
+	var out [][]string
+	cur, total := []string{}, 0
+	for _, l := range lines {
+		n := utf8.RuneCountInString(l) + 1
+		if len(cur) > 0 && total+n > tgLimit {
+			out = append(out, cur)
+			cur, total = nil, 0
+		}
+		cur = append(cur, l)
+		total += n
+	}
+	if len(cur) > 0 {
+		out = append(out, cur)
+	}
+	return out
 }
 
 // padHour приводит "6:00" к "06:00": Altegio отдаёт час без ведущего нуля,
@@ -311,18 +352,35 @@ func pickCourts(all []staff) []staff {
 		}
 		return out
 	}
-	words := strings.Split(strings.ToLower(env("NAME_FILTER", "крыт,indoor,хард")), ",")
+	filter := env("NAME_FILTER", "крыт,indoor,хард")
+	if filter == "*" {
+		return all // следим за всеми кортами, включая те, что клуб добавит позже
+	}
+	words := strings.Split(strings.ToLower(filter), ",")
 	var out []staff
 	for _, s := range all {
 		hay := strings.ToLower(s.Name + " " + s.Specialization)
 		for _, w := range words {
-			if w = strings.TrimSpace(w); w != "" && strings.Contains(hay, w) {
+			if w = strings.TrimSpace(w); w != "" && startsWord(hay, w) {
 				out = append(out, s)
 				break
 			}
 		}
 	}
 	return out
+}
+
+// startsWord: слово фильтра должно начинать какое-то слово в названии.
+// Подстрочный поиск тут не годится — "крыт" входит внутрь "открытый",
+// из-за чего фильтр крытых кортов захватывал и открытые.
+func startsWord(hay, word string) bool {
+	split := func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) }
+	for _, f := range strings.FieldsFunc(hay, split) {
+		if strings.HasPrefix(f, word) {
+			return true
+		}
+	}
+	return false
 }
 
 func notify(text string) error {
