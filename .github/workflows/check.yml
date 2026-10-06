@@ -2,8 +2,13 @@ name: court-watcher
 
 on:
   schedule:
-    - cron: "7 * * * *"   # каждый час (UTC); можно "*/20 * * * *"
+    - cron: "7 * * * *"   # каждый час (UTC); cron в Actions может опаздывать на 5-15 минут
   workflow_dispatch: {}
+
+# чтобы два запуска не писали state одновременно
+concurrency:
+  group: court-watcher
+  cancel-in-progress: false
 
 jobs:
   check:
@@ -24,14 +29,17 @@ jobs:
       - run: go run .
         env:
           COMPANY_ID: "521176"
+          API_BASE: ${{ vars.API_BASE }}
           ALTEGIO_TOKEN: ${{ secrets.ALTEGIO_TOKEN }}
           STAFF_IDS: ${{ vars.STAFF_IDS }}
           NAME_FILTER: ${{ vars.NAME_FILTER }}
+          DAYS_AHEAD: ${{ vars.DAYS_AHEAD }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
 
-      - uses: actions/cache/save@v4
-        if: always()
+      - name: save state
+        if: always() && hashFiles('state.json') != ''
+        uses: actions/cache/save@v4
         with:
           path: state.json
           key: state-${{ github.run_id }}
