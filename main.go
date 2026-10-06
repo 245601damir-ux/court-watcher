@@ -29,9 +29,10 @@ import (
 )
 
 type staff struct {
-	ID       int    `json:"id"`
-	Name     string `json:"name"`
-	Bookable bool   `json:"bookable"`
+	ID             int    `json:"id"`
+	Name           string `json:"name"`
+	Specialization string `json:"specialization"`
+	Bookable       bool   `json:"bookable"`
 }
 
 type slot struct {
@@ -154,8 +155,9 @@ func main() {
 				continue
 			}
 			for _, s := range slots {
-				key := fmt.Sprintf("%d|%s|%s", c.ID, date, s.Time)
-				current[key] = fmt.Sprintf("%s — %s %s", c.Name, date, s.Time)
+				t := padHour(s.Time)
+				key := fmt.Sprintf("%d|%s|%s", c.ID, date, t)
+				current[key] = fmt.Sprintf("%s — %s %s", c.Name, date, t)
 			}
 		}
 	}
@@ -210,6 +212,16 @@ func reportDeadToken(stateFile string, seen map[string]bool, cause error) {
 	}
 }
 
+// padHour приводит "6:00" к "06:00": Altegio отдаёт час без ведущего нуля,
+// из-за чего сортировка строк ставила 6:00 после 23:00.
+func padHour(t string) string {
+	h, rest, ok := strings.Cut(t, ":")
+	if !ok || len(h) != 1 {
+		return t
+	}
+	return "0" + h + ":" + rest
+}
+
 func pickCourts(all []staff) []staff {
 	if ids := os.Getenv("STAFF_IDS"); ids != "" {
 		want := map[string]bool{}
@@ -227,9 +239,9 @@ func pickCourts(all []staff) []staff {
 	words := strings.Split(strings.ToLower(env("NAME_FILTER", "крыт,indoor,хард")), ",")
 	var out []staff
 	for _, s := range all {
-		name := strings.ToLower(s.Name)
+		hay := strings.ToLower(s.Name + " " + s.Specialization)
 		for _, w := range words {
-			if w = strings.TrimSpace(w); w != "" && strings.Contains(name, w) {
+			if w = strings.TrimSpace(w); w != "" && strings.Contains(hay, w) {
 				out = append(out, s)
 				break
 			}
