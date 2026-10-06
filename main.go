@@ -26,6 +26,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 type staff struct {
@@ -42,6 +43,13 @@ type slot struct {
 
 type datesResp struct {
 	BookingDates []string `json:"booking_dates"`
+}
+
+// freeSlot — один свободный час на одном корте.
+type freeSlot struct {
+	court string
+	date  string // 2026-10-07
+	hour  string // 19:00
 }
 
 var (
@@ -104,9 +112,9 @@ func get(path string, out any) error {
 // Успешный прогон перезаписывает state одними слотами, так что флаг сам исчезает.
 const authAlertKey = "__auth_alert_sent"
 
-// maxListed — сколько слотов перечисляем в сообщении. У Telegram лимит 4096
-// символов, а первый прогон (пустой state) находит сразу сотни слотов.
-const maxListed = 40
+// tgLimit — предел Telegram на одно сообщение 4096 символов; берём с запасом
+// под заголовок и ссылку. Первый прогон (пустой state) находит сразу сотни слотов.
+const tgLimit = 3500
 
 func main() {
 	cid := env("COMPANY_ID", "521176")
@@ -137,7 +145,7 @@ func main() {
 	}
 
 	limit := time.Now().AddDate(0, 0, days).Format("2006-01-02")
-	current := map[string]string{} // ключ -> человекочитаемая строка
+	current := map[string]freeSlot{} // ключ -> слот
 
 	for _, c := range courts {
 		var d datesResp
@@ -157,12 +165,12 @@ func main() {
 			for _, s := range slots {
 				t := padHour(s.Time)
 				key := fmt.Sprintf("%d|%s|%s", c.ID, date, t)
-				current[key] = fmt.Sprintf("%s — %s %s", c.Name, date, t)
+				current[key] = freeSlot{court: c.Name, date: date, hour: t}
 			}
 		}
 	}
 
-	var fresh []string
+	var fresh []freeSlot
 	newState := map[string]bool{}
 	for k, v := range current {
 		newState[k] = true
@@ -170,16 +178,24 @@ func main() {
 			fresh = append(fresh, v)
 		}
 	}
-	sort.Strings(fresh)
+	sort.Slice(fresh, func(i, j int) bool {
+		a, b := fresh[i], fresh[j]
+		if a.date != b.date {
+			return a.date < b.date
+		}
+		if a.hour != b.hour {
+			return a.hour < b.hour
+		}
+		return a.court < b.court
+	})
 
 	log.Printf("кортов: %d, свободных слотов: %d, новых: %d", len(courts), len(current), len(fresh))
 	if len(fresh) > 0 {
-		shown, tail := fresh, ""
-		if len(shown) > maxListed {
-			tail = fmt.Sprintf("\n…и ещё %d слотов", len(shown)-maxListed)
-			shown = shown[:maxListed]
+		body, dropped := fitLines(groupByTime(fresh))
+		if dropped > 0 {
+			body += fmt.Sprintf("\n…и ещё %d строк", dropped)
 		}
-		msg := "🎾 Появились слоты (" + kinds(courts) + "):\n" + strings.Join(shown, "\n") + tail +
+		msg := "🎾 Появились слоты (" + kinds(courts) + "):\n" + body +
 			"\n\nhttps://academytennisdaulet.altegio.me/company/" + cid + "/personal/select-master"
 		if err := notify(msg); err != nil {
 			log.Fatalf("telegram: %v", err) // не сохраняем state, чтобы повторить в следующий раз
@@ -210,6 +226,46 @@ func reportDeadToken(stateFile string, seen map[string]bool, cause error) {
 	if err := os.WriteFile(stateFile, b, 0o644); err != nil {
 		log.Printf("state: %v", err)
 	}
+}
+
+var ruMonths = [...]string{"янв", "фев", "мар", "апр", "май", "июн",
+	"июл", "авг", "сен", "окт", "ноя", "дек"}
+
+// ruDate переводит "2026-10-07" в "7 окт".
+func ruDate(iso string) string {
+	t, err := time.Parse("2006-01-02", iso)
+	if err != nil {
+		return iso
+	}
+	return fmt.Sprintf("%d %s", t.Day(), ruMonths[t.Month()-1])
+}
+
+// groupByTime собирает слоты одного часа в строку "7 окт 19:00 — Корт 1, Корт 3".
+// fresh должен быть отсортирован по дате, часу и названию корта.
+func groupByTime(fresh []freeSlot) []string {
+	var lines []string
+	for i := 0; i < len(fresh); {
+		j, names := i, []string{}
+		for ; j < len(fresh) && fresh[j].date == fresh[i].date && fresh[j].hour == fresh[i].hour; j++ {
+			names = append(names, fresh[j].court)
+		}
+		lines = append(lines, fmt.Sprintf("%s %s — %s",
+			ruDate(fresh[i].date), fresh[i].hour, strings.Join(names, ", ")))
+		i = j
+	}
+	return lines
+}
+
+// fitLines берёт столько строк, сколько влезает в лимит Telegram, и сообщает,
+// сколько осталось за бортом. Telegram считает символы, а не байты.
+func fitLines(lines []string) (string, int) {
+	total := 0
+	for i, l := range lines {
+		if total += utf8.RuneCountInString(l) + 1; total > tgLimit {
+			return strings.Join(lines[:i], "\n"), len(lines) - i
+		}
+	}
+	return strings.Join(lines, "\n"), 0
 }
 
 // kinds перечисляет специализации отобранных кортов, чтобы заголовок не врал:
