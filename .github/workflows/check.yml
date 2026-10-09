@@ -51,6 +51,8 @@ jobs:
           BOOK_KINDS: ${{ vars.BOOK_KINDS }}
           BOOK_MAX: ${{ vars.BOOK_MAX }}
           BOOK_TOTAL: ${{ vars.BOOK_TOTAL }}
+          BOOK_MIN_LEAD: ${{ vars.BOOK_MIN_LEAD }}
+          TZ_OFFSET: ${{ vars.TZ_OFFSET }}
           BOOK_NAME: ${{ secrets.BOOK_NAME }}
           BOOK_PHONE: ${{ secrets.BOOK_PHONE }}
           BOOK_EMAIL: ${{ secrets.BOOK_EMAIL }}

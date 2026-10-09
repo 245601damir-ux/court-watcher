@@ -22,6 +22,8 @@
 //	BOOK_EMAIL    — email, если клуб его требует
 //	BOOK_MAX      — предохранитель: максимум броней за один прогон (по умолчанию 1)
 //	BOOK_TOTAL    — предохранитель: сколько броней бот сделает всего (по умолчанию 4)
+//	BOOK_MIN_LEAD — не бронировать, если до начала осталось меньше N часов (по умолчанию 3)
+//	TZ_OFFSET     — часовой пояс клуба, часы от UTC (по умолчанию 5, Asia/Almaty)
 package main
 
 import (
@@ -355,16 +357,37 @@ func autoBook(cid string, current map[string]freeSlot, newState map[string]bool,
 	}
 	kinds := splitCSV(os.Getenv("BOOK_KINDS"))
 
+	lead := 3.0
+	fmt.Sscanf(env("BOOK_MIN_LEAD", "3"), "%f", &lead)
+	minLead := time.Duration(lead * float64(time.Hour))
+
+	// Altegio отдаёт время в поясе клуба, а раннер GitHub живёт в UTC: без
+	// явного пояса "22:00" уехало бы на 5 часов и фильтр врал бы наоборот.
+	tzOff := 5
+	fmt.Sscanf(env("TZ_OFFSET", "5"), "%d", &tzOff)
+	loc := time.FixedZone("venue", tzOff*3600)
+
 	perRun, total := 1, 4
 	fmt.Sscanf(env("BOOK_MAX", "1"), "%d", &perRun)
 	fmt.Sscanf(env("BOOK_TOTAL", "4"), "%d", &total)
 	// порядок обхода map случаен — сортируем, чтобы брать самый ранний слот
 	var want []freeSlot
+	matched, tooSoon := 0, 0
 	for _, s := range current {
 		if !has(hours, s.hour) {
 			continue
 		}
 		if len(kinds) > 0 && !has(kinds, s.label) {
+			continue
+		}
+		matched++
+		start, err := time.ParseInLocation("2006-01-02 15:04", s.date+" "+s.hour, loc)
+		if err != nil {
+			log.Printf("автобронь: не разобрал время %s %s: %v", s.date, s.hour, err)
+			continue
+		}
+		if time.Until(start) < minLead {
+			tooSoon++
 			continue
 		}
 		want = append(want, s)
@@ -375,7 +398,8 @@ func autoBook(cid string, current map[string]freeSlot, newState map[string]bool,
 		}
 		return want[i].court < want[j].court
 	})
-	log.Printf("автобронь: подходящих слотов %d (часы %v, типы %v)", len(want), hours, kinds)
+	log.Printf("автобронь: подходящих слотов %d из %d (часы %v, типы %v); отсеяно по запасу <%gч: %d)",
+		len(want), matched, hours, kinds, lead, tooSoon)
 	if already >= total {
 		log.Printf("автобронь: лимит BOOK_TOTAL=%d исчерпан, броней сделано %d", total, already)
 		return
