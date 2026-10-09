@@ -12,9 +12,20 @@
 //	DAYS_AHEAD    — на сколько дней вперёд смотреть (по умолчанию 7)
 //	TG_TOKEN, TG_CHAT_ID — бот и чат для уведомлений
 //	STATE_FILE    — файл с уже отправленными слотами (по умолчанию state.json)
+//
+// Автобронь (по умолчанию выключена — пустой BOOK_HOURS):
+//
+//	BOOK_HOURS    — часы, которые бронировать автоматически, например "22:00"
+//	BOOK_KINDS    — типы кортов через запятую: "крытый", "открытый", "стенка", "пляжный"
+//	BOOK_NAME     — имя для брони (без него бронь не делается)
+//	BOOK_PHONE    — телефон для брони (без него бронь не делается)
+//	BOOK_EMAIL    — email, если клуб его требует
+//	BOOK_MAX      — предохранитель: максимум броней за один прогон (по умолчанию 1)
+//	BOOK_TOTAL    — предохранитель: сколько броней бот сделает всего (по умолчанию 4)
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,11 +59,12 @@ type datesResp struct {
 
 // freeSlot — один свободный час на одном корте.
 type freeSlot struct {
-	court string
-	sign  string // значок типа корта: 🏠 / ☀️ / 🧱
-	label string // расшифровка значка
-	date  string // 2026-10-07
-	hour  string // 19:00
+	court   string
+	staffID int
+	sign    string // значок типа корта: 🏠 / ☀️ / 🧱
+	label   string // расшифровка значка
+	date    string // 2026-10-07
+	hour    string // 19:00
 }
 
 var (
@@ -169,13 +181,23 @@ func main() {
 				t := padHour(s.Time)
 				key := fmt.Sprintf("%d|%s|%s", c.ID, date, t)
 				sign, label := kindLabel(c.Specialization)
-				current[key] = freeSlot{court: c.Name, sign: sign, label: label, date: date, hour: t}
+				current[key] = freeSlot{
+					court: c.Name, staffID: c.ID,
+					sign: sign, label: label, date: date, hour: t,
+				}
 			}
 		}
 	}
 
 	var fresh []freeSlot
 	newState := map[string]bool{}
+	bookedBefore := 0
+	for k := range seen {
+		if strings.HasPrefix(k, bookedPrefix) {
+			newState[k] = true // лимит броней должен жить между прогонами
+			bookedBefore++
+		}
+	}
 	for k, v := range current {
 		newState[k] = true
 		if !seen[k] {
@@ -197,6 +219,10 @@ func main() {
 	})
 
 	log.Printf("кортов: %d, свободных слотов: %d, новых: %d", len(courts), len(current), len(fresh))
+	// бронируем из current, а не из fresh: если прошлая попытка не удалась,
+	// слот уже не "новый", но взять его всё ещё надо
+	autoBook(cid, current, newState, bookedBefore)
+
 	chunks := chunkLines(groupByTime(fresh))
 	for i, ch := range chunks {
 		head := "🎾 Появились слоты\n" + legend(fresh) + "\n\n"
@@ -240,6 +266,167 @@ func reportDeadToken(stateFile string, seen map[string]bool, cause error) {
 
 var ruMonths = [...]string{"янв", "фев", "мар", "апр", "май", "июн",
 	"июл", "авг", "сен", "окт", "ноя", "дек"}
+
+// bookedPrefix помечает в state слоты, которые бот забронировал. Такие ключи
+// переносятся между прогонами, иначе предохранитель BOOK_TOTAL обнулялся бы.
+const bookedPrefix = "booked|"
+
+func splitCSV(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(strings.ToLower(p)); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func has(list []string, v string) bool {
+	for _, x := range list {
+		if x == strings.ToLower(v) {
+			return true
+		}
+	}
+	return false
+}
+
+// post отправляет JSON и раскладывает поле data в out.
+func post(path string, body, out any) error {
+	raw, _ := json.Marshal(body)
+	req, _ := http.NewRequest("POST", apiBase+path, bytes.NewReader(raw))
+	req.Header.Set("Accept", "application/vnd.api.v2+json")
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	rb, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return &httpErr{
+			code: resp.StatusCode,
+			msg:  fmt.Sprintf("%s: HTTP %d: %.300s", path, resp.StatusCode, rb),
+		}
+	}
+	if out == nil {
+		return nil
+	}
+	var wrap struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if json.Unmarshal(rb, &wrap) == nil && len(wrap.Data) > 0 {
+		rb = wrap.Data
+	}
+	return json.Unmarshal(rb, out)
+}
+
+// pickService ищет услугу, которой бронируется корт. Захардкодить её нельзя:
+// у крытых кортов услуг сейчас нет вовсе, они появятся вместе с кортами.
+func pickService(cid string, staffID int) (int, int, error) {
+	var r struct {
+		Services []struct {
+			ID       int `json:"id"`
+			PriceMin int `json:"price_min"`
+		} `json:"services"`
+	}
+	if err := get(fmt.Sprintf("/book_services/%s?staff_id=%d", cid, staffID), &r); err != nil {
+		return 0, 0, err
+	}
+	if len(r.Services) == 0 {
+		return 0, 0, fmt.Errorf("у корта нет услуг — бронировать нечем")
+	}
+	return r.Services[0].ID, r.Services[0].PriceMin, nil
+}
+
+// autoBook бронирует подходящие слоты и пишет об этом в Telegram.
+// Выключена, пока не заданы BOOK_HOURS, BOOK_NAME и BOOK_PHONE.
+func autoBook(cid string, current map[string]freeSlot, newState map[string]bool, already int) {
+	hours := splitCSV(os.Getenv("BOOK_HOURS"))
+	if len(hours) == 0 {
+		return
+	}
+	name, phone := os.Getenv("BOOK_NAME"), os.Getenv("BOOK_PHONE")
+	if name == "" || phone == "" {
+		log.Println("автобронь: BOOK_HOURS задан, но BOOK_NAME/BOOK_PHONE пусты — не бронирую")
+		return
+	}
+	kinds := splitCSV(os.Getenv("BOOK_KINDS"))
+
+	perRun, total := 1, 4
+	fmt.Sscanf(env("BOOK_MAX", "1"), "%d", &perRun)
+	fmt.Sscanf(env("BOOK_TOTAL", "4"), "%d", &total)
+	// порядок обхода map случаен — сортируем, чтобы брать самый ранний слот
+	var want []freeSlot
+	for _, s := range current {
+		if !has(hours, s.hour) {
+			continue
+		}
+		if len(kinds) > 0 && !has(kinds, s.label) {
+			continue
+		}
+		want = append(want, s)
+	}
+	sort.Slice(want, func(i, j int) bool {
+		if want[i].date != want[j].date {
+			return want[i].date < want[j].date
+		}
+		return want[i].court < want[j].court
+	})
+	log.Printf("автобронь: подходящих слотов %d (часы %v, типы %v)", len(want), hours, kinds)
+	if already >= total {
+		log.Printf("автобронь: лимит BOOK_TOTAL=%d исчерпан, броней сделано %d", total, already)
+		return
+	}
+
+	done := 0
+	for _, s := range want {
+		if done >= perRun || already+done >= total {
+			break
+		}
+		key := fmt.Sprintf("%s%d|%s|%s", bookedPrefix, s.staffID, s.date, s.hour)
+		if newState[key] {
+			continue
+		}
+		svc, price, err := pickService(cid, s.staffID)
+		if err != nil {
+			log.Printf("автобронь %s %s %s: %v", s.court, s.date, s.hour, err)
+			continue
+		}
+		body := map[string]any{
+			"phone":    phone,
+			"fullname": name,
+			"email":    os.Getenv("BOOK_EMAIL"),
+			"comment":  "court-watcher",
+			"appointments": []map[string]any{{
+				"id":       1,
+				"services": []int{svc},
+				"staff_id": s.staffID,
+				"datetime": fmt.Sprintf("%s %s:00", s.date, s.hour),
+			}},
+		}
+		if err := post("/book_record/"+cid, body, nil); err != nil {
+			log.Printf("автобронь %s %s %s: %v", s.court, s.date, s.hour, err)
+			if nerr := notify(fmt.Sprintf("⚠️ Не смог забронировать %s %s %s:\n%v",
+				s.court, ruDate(s.date), s.hour, err)); nerr != nil {
+				log.Printf("telegram: %v", nerr)
+			}
+			continue
+		}
+		newState[key] = true
+		done++
+		msg := fmt.Sprintf("✅ Забронировал\n%s %s %s %s\nцена: %d ₸\n\nброней сделано: %d из %d (BOOK_TOTAL)",
+			s.sign, s.court, ruDate(s.date), s.hour, price, already+done, total)
+		if err := notify(msg); err != nil {
+			log.Printf("telegram: %v", err)
+		}
+	}
+	if done > 0 {
+		log.Printf("автобронь: забронировано %d", done)
+	}
+}
 
 // ruDate переводит "2026-10-07" в "7 окт".
 func ruDate(iso string) string {

@@ -38,6 +38,14 @@ jobs:
           DAYS_AHEAD: ${{ vars.DAYS_AHEAD }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          # автобронь: без BOOK_NAME/BOOK_PHONE не бронирует, только уведомляет
+          BOOK_HOURS: ${{ vars.BOOK_HOURS }}
+          BOOK_KINDS: ${{ vars.BOOK_KINDS }}
+          BOOK_MAX: ${{ vars.BOOK_MAX }}
+          BOOK_TOTAL: ${{ vars.BOOK_TOTAL }}
+          BOOK_NAME: ${{ secrets.BOOK_NAME }}
+          BOOK_PHONE: ${{ secrets.BOOK_PHONE }}
+          BOOK_EMAIL: ${{ secrets.BOOK_EMAIL }}
 
       - name: save state
         if: always() && hashFiles('state.json') != ''
