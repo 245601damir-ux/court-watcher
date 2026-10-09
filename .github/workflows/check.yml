@@ -1,12 +1,15 @@
 name: court-watcher
 
+# Расписание Actions - best-effort: опоздавшие срабатывания отбрасываются,
+# а не ставятся в очередь. При cron "*/15" окно между срабатываниями всего
+# 15 минут, поэтому GitHub съедал большую их часть и фактический интервал
+# выходил 27-60 минут. Поэтому крон часовой, а 15-минутный шаг делает цикл
+# внутри прогона - ему throttling GitHub уже не мешает.
 on:
   schedule:
-    - cron: "*/15 * * * *"   # каждые 15 минут (UTC); Actions может опаздывать на 5-15 минут,
-                             # так что фактический интервал плавает
+    - cron: "0 * * * *"
   workflow_dispatch: {}
 
-# чтобы два запуска не писали state одновременно
 concurrency:
   group: court-watcher
   cancel-in-progress: false
@@ -14,21 +17,26 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 55   # 3 паузы по 15 минут + запас; иначе зависший job держит раннер
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: "1.22"
-          cache: false   # зависимостей нет, go.sum тоже — иначе шлёт warning каждый прогон
+          cache: false   # зависимостей нет, go.sum тоже - иначе шлёт warning каждый прогон
 
-      # state.json между запусками — чтобы не слать одни и те же слоты
+      # state.json между прогонами - чтобы не слать одни и те же слоты.
+      # Внутри прогона все 4 проверки пишут в один и тот же файл, так что
+      # дубли не уходят и между ними.
       - uses: actions/cache/restore@v4
         with:
           path: state.json
           key: state-${{ github.run_id }}
           restore-keys: state-
 
-      - run: go run .
+      - run: go build -o court-watcher .
+
+      - name: проверка каждые 15 минут
         env:
           COMPANY_ID: "521176"
           API_BASE: ${{ vars.API_BASE }}
@@ -46,6 +54,15 @@ jobs:
           BOOK_NAME: ${{ secrets.BOOK_NAME }}
           BOOK_PHONE: ${{ secrets.BOOK_PHONE }}
           BOOK_EMAIL: ${{ secrets.BOOK_EMAIL }}
+        run: |
+          fail=0
+          for i in 1 2 3 4; do
+            echo "::group::проверка $i/4  ($(date -u '+%H:%M:%S') UTC)"
+            ./court-watcher || fail=1   # не прерываем цикл: следующая проверка может пройти
+            echo "::endgroup::"
+            [ "$i" -lt 4 ] && sleep 900
+          done
+          exit $fail   # падение любой проверки должно быть видно в Actions
 
       - name: save state
         if: always() && hashFiles('state.json') != ''
