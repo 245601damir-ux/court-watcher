@@ -17,7 +17,7 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 55   # 3 паузы по 15 минут + запас; иначе зависший job держит раннер
+    timeout-minutes: 70   # job может тянуться почти час: ждёт четверти до верха следующего часа
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -36,7 +36,7 @@ jobs:
 
       - run: go build -o court-watcher .
 
-      - name: проверка каждые 15 минут
+      - name: проверка в :00 :15 :30 :45
         env:
           COMPANY_ID: "521176"
           API_BASE: ${{ vars.API_BASE }}
@@ -55,13 +55,24 @@ jobs:
           BOOK_PHONE: ${{ secrets.BOOK_PHONE }}
           BOOK_EMAIL: ${{ secrets.BOOK_EMAIL }}
         run: |
+          # Крон приходит в произвольную минуту (GitHub опаздывает), поэтому
+          # каждую проверку выравниваем на ближайшую четверть часа. Работаем до
+          # верха следующего часа - дальше эстафету принимает следующий прогон,
+          # так что наложения прогонов не копятся.
+          deadline=$(( ( $(date -u +%s) / 3600 + 1 ) * 3600 ))
           fail=0
-          for i in 1 2 3 4; do
-            echo "::group::проверка $i/4  ($(date -u '+%H:%M:%S') UTC)"
+          n=0
+          while :; do
+            now=$(date -u +%s)
+            next=$(( (now / 900 + 1) * 900 ))
+            [ "$next" -gt "$deadline" ] && break
+            sleep $(( next - now ))
+            n=$(( n + 1 ))
+            echo "::group::проверка $n  ($(date -u '+%H:%M:%S') UTC)"
             ./court-watcher || fail=1   # не прерываем цикл: следующая проверка может пройти
             echo "::endgroup::"
-            [ "$i" -lt 4 ] && sleep 900
           done
+          echo "проверок за прогон: $n"
           exit $fail   # падение любой проверки должно быть видно в Actions
 
       - name: save state
