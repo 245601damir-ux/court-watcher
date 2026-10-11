@@ -43,6 +43,7 @@ jobs:
           ALTEGIO_TOKEN: ${{ secrets.ALTEGIO_TOKEN }}
           STAFF_IDS: ${{ vars.STAFF_IDS }}
           NAME_FILTER: ${{ vars.NAME_FILTER }}
+          SKIP_HOURS: ${{ vars.SKIP_HOURS }}
           DAYS_AHEAD: ${{ vars.DAYS_AHEAD }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}

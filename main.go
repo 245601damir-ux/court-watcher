@@ -12,6 +12,8 @@
 //	DAYS_AHEAD    — на сколько дней вперёд смотреть (по умолчанию 7)
 //	TG_TOKEN, TG_CHAT_ID — бот и чат для уведомлений
 //	STATE_FILE    — файл с уже отправленными слотами (по умолчанию state.json)
+//	SKIP_HOURS    — часы, которые не показывать: "00:00,06:00-07:00"
+//	                (диапазон включает оба конца)
 //
 // Автобронь (по умолчанию выключена — пустой BOOK_HOURS):
 //
@@ -191,6 +193,9 @@ func main() {
 		}
 	}
 
+	skip := parseHourSet(os.Getenv("SKIP_HOURS"))
+	hidden := 0
+
 	var fresh []freeSlot
 	newState := map[string]bool{}
 	bookedBefore := 0
@@ -202,9 +207,14 @@ func main() {
 	}
 	for k, v := range current {
 		newState[k] = true
-		if !seen[k] {
-			fresh = append(fresh, v)
+		if seen[k] {
+			continue
 		}
+		if skip[v.hour] {
+			hidden++ // в state всё равно помечен, иначе всплывёт при смене SKIP_HOURS
+			continue
+		}
+		fresh = append(fresh, v)
 	}
 	sort.Slice(fresh, func(i, j int) bool {
 		a, b := fresh[i], fresh[j]
@@ -220,7 +230,8 @@ func main() {
 		return a.court < b.court
 	})
 
-	log.Printf("кортов: %d, свободных слотов: %d, новых: %d", len(courts), len(current), len(fresh))
+	log.Printf("кортов: %d, свободных слотов: %d, новых: %d (скрыто по SKIP_HOURS: %d)",
+		len(courts), len(current), len(fresh), hidden)
 	// бронируем из current, а не из fresh: если прошлая попытка не удалась,
 	// слот уже не "новый", но взять его всё ещё надо
 	autoBook(cid, current, newState, bookedBefore)
@@ -537,6 +548,29 @@ func chunkLines(lines []string) [][]string {
 		out = append(out, cur)
 	}
 	return out
+}
+
+// parseHourSet разбирает список часов вида "00:00,06:00-07:00".
+// Диапазон включает оба конца.
+func parseHourSet(spec string) map[string]bool {
+	set := map[string]bool{}
+	for _, part := range splitCSV(spec) {
+		from, to, isRange := strings.Cut(part, "-")
+		if !isRange {
+			set[padHour(from)] = true
+			continue
+		}
+		a, err1 := time.Parse("15:04", padHour(strings.TrimSpace(from)))
+		b, err2 := time.Parse("15:04", padHour(strings.TrimSpace(to)))
+		if err1 != nil || err2 != nil {
+			log.Printf("SKIP_HOURS: не разобрал %q, пропускаю", part)
+			continue
+		}
+		for t := a; !t.After(b); t = t.Add(time.Hour) {
+			set[t.Format("15:04")] = true
+		}
+	}
+	return set
 }
 
 // padHour приводит "6:00" к "06:00": Altegio отдаёт час без ведущего нуля,
